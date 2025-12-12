@@ -5,9 +5,10 @@ import { Plus, Search, MapPin, DollarSign, Calendar, ChevronRight, X, Loader2, S
 
 interface JobTrackerProps {
   jobs: Job[];
-  setJobs: React.Dispatch<React.SetStateAction<Job[]>>;
+  onAddJob: (job: Job) => Promise<void>;
+  onUpdateJob: (job: Job) => Promise<void>;
+  onDeleteJob: (id: string) => Promise<void>;
   viewMode?: 'applications' | 'offers';
-  onStatusChange?: (job: Job, newStatus: JobStatus) => void;
 }
 
 // Helper to parse bold text
@@ -66,7 +67,7 @@ const FormattedDisplay = ({ text }: { text: string | undefined }) => {
   );
 };
 
-const JobTracker: React.FC<JobTrackerProps> = ({ jobs, setJobs, viewMode = 'applications', onStatusChange }) => {
+const JobTracker: React.FC<JobTrackerProps> = ({ jobs, onAddJob, onUpdateJob, onDeleteJob, viewMode = 'applications' }) => {
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
 
@@ -134,8 +135,9 @@ const JobTracker: React.FC<JobTrackerProps> = ({ jobs, setJobs, viewMode = 'appl
     const today = new Date();
     const dateString = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
 
+    // ID will be assigned by DB or temporary placeholder, we pass what we have
     const jobToAdd: Job = {
-      id: Date.now().toString(),
+      id: '', // Empty ID, let backend or App handler handle it
       company: newJob.company,
       role: newJob.role,
       location: newJob.location || 'Remote',
@@ -146,10 +148,11 @@ const JobTracker: React.FC<JobTrackerProps> = ({ jobs, setJobs, viewMode = 'appl
       email: newJob.email || '',
       coverLetter: coverLetter,
       interviewGuide: interviewGuide,
-      origin: isOffersMode ? 'offer' : 'application' // Set origin based on current view
+      origin: isOffersMode ? 'offer' : 'application'
     };
 
-    setJobs(prev => [jobToAdd, ...prev]);
+    await onAddJob(jobToAdd);
+    
     setIsGenerating(false);
     setShowAddModal(false);
     setNewJob({ 
@@ -163,41 +166,34 @@ const JobTracker: React.FC<JobTrackerProps> = ({ jobs, setJobs, viewMode = 'appl
     });
   };
 
-  const handleDeleteJob = (jobId: string, e?: React.MouseEvent) => {
-    // Stop propagation immediately to prevent opening the job detail
+  const handleDeleteJob = async (jobId: string, e?: React.MouseEvent) => {
     if (e) {
       e.stopPropagation();
       e.preventDefault();
     }
     
-    // Removed window.confirm to ensure the action is executed immediately for better UX
-    setJobs(prev => prev.filter(job => job.id !== jobId));
+    await onDeleteJob(jobId);
     
-    // If the deleted job was selected, close the detail view
     if (selectedJob?.id === jobId) {
       setSelectedJob(null);
     }
   };
 
-  const handleStatusChange = (jobId: string, newStatusStr: string) => {
+  const handleStatusChange = async (jobId: string, newStatusStr: string) => {
     const newStatus = newStatusStr as JobStatus;
-    
-    // Notify parent about status change before updating state
     const jobToUpdate = jobs.find(j => j.id === jobId);
-    if (onStatusChange && jobToUpdate && jobToUpdate.status !== newStatus) {
-      onStatusChange(jobToUpdate, newStatus);
-    }
-
-    setJobs(prev => prev.map(job => 
-      job.id === jobId ? { ...job, status: newStatus } : job
-    ));
     
-    if (selectedJob && selectedJob.id === jobId) {
-      setSelectedJob(prev => prev ? { ...prev, status: newStatus } : null);
+    if (jobToUpdate) {
+       const updatedJob = { ...jobToUpdate, status: newStatus };
+       await onUpdateJob(updatedJob);
+       
+       if (selectedJob && selectedJob.id === jobId) {
+         setSelectedJob(updatedJob);
+       }
     }
   };
 
-  // Improved logic to check if we should treat this job as an offer (for PDF and Display)
+  // Improved logic to check if we should treat this job as an offer
   const isJobOfferType = (job: Job) => {
     return job.origin === 'offer' || job.status === JobStatus.OFFER;
   };
@@ -253,19 +249,20 @@ const JobTracker: React.FC<JobTrackerProps> = ({ jobs, setJobs, viewMode = 'appl
   const handleRegenerate = async () => {
     if (!selectedJob) return;
     
-    // Robust check for guide type
     const isGuide = isJobOfferType(selectedJob);
     
     try {
       let newContent = '';
       if (isGuide) {
         newContent = await generateInterviewGuide(selectedJob.company, selectedJob.role, selectedJob.description);
-        setJobs(prev => prev.map(j => j.id === selectedJob.id ? { ...j, interviewGuide: newContent } : j));
-        setSelectedJob(prev => prev ? { ...prev, interviewGuide: newContent } : null);
+        const updatedJob = { ...selectedJob, interviewGuide: newContent };
+        await onUpdateJob(updatedJob);
+        setSelectedJob(updatedJob);
       } else {
         newContent = await generateCoverLetter(selectedJob.company, selectedJob.role, selectedJob.description);
-        setJobs(prev => prev.map(j => j.id === selectedJob.id ? { ...j, coverLetter: newContent } : j));
-        setSelectedJob(prev => prev ? { ...prev, coverLetter: newContent } : null);
+        const updatedJob = { ...selectedJob, coverLetter: newContent };
+        await onUpdateJob(updatedJob);
+        setSelectedJob(updatedJob);
       }
     } catch (e) {
       console.error("Regeneration failed", e);
@@ -284,7 +281,6 @@ const JobTracker: React.FC<JobTrackerProps> = ({ jobs, setJobs, viewMode = 'appl
     }
   };
 
-  // Helper to determine what content to show using robust check
   const isInterviewGuideContent = selectedJob ? isJobOfferType(selectedJob) : false;
   const displayContent = isInterviewGuideContent ? selectedJob?.interviewGuide : selectedJob?.coverLetter;
   const contentTitle = isInterviewGuideContent ? 'AI Interview Guide' : 'AI Cover Letter';

@@ -90,7 +90,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentView, onChangeView, hasUnreadM
         <div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center backdrop-blur-sm border border-white/10">
           <Briefcase className="w-5 h-5 text-white" />
         </div>
-        <span className="text-xl font-bold text-white tracking-tight">JobFlow</span>
+        <span className="text-xl font-bold text-white tracking-tight">CareerPilot</span>
       </div>
 
       <nav className="flex-1 px-4 py-4 space-y-2 overflow-y-auto custom-scrollbar">

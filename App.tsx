@@ -5,23 +5,20 @@ import JobTracker from './components/JobTracker';
 import ResumeBuilder from './components/ResumeBuilder';
 import AvatarGenerator from './components/AvatarGenerator';
 import ClaireChat from './components/ClaireChat';
+import Auth from './components/Auth';
+import { supabase } from './services/supabase';
 import { Job, ViewState, Resume, Message, JobStatus } from './types';
+import { Session } from '@supabase/supabase-js';
 
 const App: React.FC = () => {
+  const [session, setSession] = useState<Session | null>(null);
   const [currentView, setCurrentView] = useState<ViewState>(ViewState.DASHBOARD);
+  const [loading, setLoading] = useState(true);
   
-  // Initialize state from localStorage
-  const [jobs, setJobs] = useState<Job[]>(() => {
-    try {
-      const savedJobs = localStorage.getItem('jobflow_jobs');
-      return savedJobs ? JSON.parse(savedJobs) : [];
-    } catch (e) {
-      console.error("Failed to parse jobs from local storage", e);
-      return [];
-    }
-  });
+  // Jobs State
+  const [jobs, setJobs] = useState<Job[]>([]);
 
-  // Chat State (Lifted from ClaireChat)
+  // Chat State
   const [claireMessages, setClaireMessages] = useState<Message[]>([
     {
       id: 'welcome',
@@ -33,62 +30,204 @@ const App: React.FC = () => {
 
   // Resume State
   const [resume, setResume] = useState<Resume>({
-    fullName: 'Alex Johnson',
-    email: 'alex.j@example.com',
-    phone: '+1 (555) 123-4567',
-    summary: 'Experienced Software Engineer with a passion for building scalable web applications. Proven track record in full-stack development using React and Node.js.',
-    skills: 'React, TypeScript, Node.js, Tailwind CSS, AWS, Docker, GraphQL',
-    experience: [
-      {
-        id: '1',
-        title: 'Senior Frontend Engineer',
-        company: 'TechCorp Inc.',
-        date: '2021 - Present',
-        details: 'Led the migration of legacy codebase to React 18. Improved site performance by 40%.'
-      }
-    ],
-    education: [
-      {
-        id: '1',
-        title: 'B.S. Computer Science',
-        company: 'University of Technology',
-        date: '2017 - 2021',
-        details: 'Graduated with Honors. Dean\'s List all semesters.'
-      }
-    ],
-    projects: [
-      {
-        id: '1',
-        name: 'E-commerce Platform',
-        technologies: 'Next.js, Stripe, Supabase',
-        link: 'github.com/alex/shop',
-        description: 'Built a fully functional e-commerce store with real-time inventory management and secure payment processing.'
-      }
-    ]
+    fullName: '',
+    email: '',
+    phone: '',
+    summary: '',
+    skills: '',
+    experience: [],
+    education: [],
+    projects: []
   });
 
-  // Save to localStorage whenever jobs change
+  // Handle Session & Initial Fetch
   useEffect(() => {
-    try {
-      localStorage.setItem('jobflow_jobs', JSON.stringify(jobs));
-    } catch (e) {
-      console.error("Failed to save jobs to local storage", e);
-    }
-  }, [jobs]);
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (session) {
+        fetchData();
+      } else {
+        setLoading(false);
+      }
+    });
 
-  // Clear unread badge when viewing Claire
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      if (session) fetchData();
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Save resume to Supabase (Debounced)
   useEffect(() => {
-    if (currentView === ViewState.CLAIRE) {
-      setUnreadClaire(false);
+    if (!session || !resume.fullName) return; // Don't save empty init state
+    const timer = setTimeout(() => {
+        saveResumeToSupabase(resume);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [resume, session]);
+
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      // Fetch Jobs
+      const { data: jobsData, error: jobsError } = await supabase
+        .from('jobs')
+        .select('*')
+        .order('created_at', { ascending: false });
+      
+      if (jobsError) throw jobsError;
+      
+      // Transform snake_case to camelCase manually if needed, or assume table columns match types if carefully created.
+      // Based on SQL, columns are snake_case (date_applied, cover_letter, etc). We need to map them.
+      const mappedJobs: Job[] = (jobsData || []).map((j: any) => ({
+        id: j.id,
+        company: j.company,
+        role: j.role,
+        location: j.location,
+        salary: j.salary,
+        status: j.status,
+        dateApplied: j.date_applied, // Map snake_case to camelCase
+        description: j.description,
+        coverLetter: j.cover_letter,
+        interviewGuide: j.interview_guide,
+        email: j.email,
+        origin: j.origin
+      }));
+      setJobs(mappedJobs);
+
+      // Fetch Resume
+      const { data: resumeData, error: resumeError } = await supabase
+        .from('resumes')
+        .select('*')
+        .limit(1)
+        .single();
+        
+      if (resumeData) {
+        setResume({
+           fullName: resumeData.full_name,
+           email: resumeData.email,
+           phone: resumeData.phone,
+           summary: resumeData.summary,
+           skills: resumeData.skills,
+           experience: resumeData.experience || [],
+           education: resumeData.education || [],
+           projects: resumeData.projects || [],
+           avatar: resumeData.avatar
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    } finally {
+      setLoading(false);
     }
-  }, [currentView]);
+  };
+
+  const saveResumeToSupabase = async (currentResume: Resume) => {
+    const { data: existing } = await supabase.from('resumes').select('id').limit(1).single();
+    
+    const payload = {
+       full_name: currentResume.fullName,
+       email: currentResume.email,
+       phone: currentResume.phone,
+       summary: currentResume.summary,
+       skills: currentResume.skills,
+       experience: currentResume.experience,
+       education: currentResume.education,
+       projects: currentResume.projects,
+       avatar: currentResume.avatar,
+       user_id: session?.user.id
+    };
+
+    if (existing) {
+       await supabase.from('resumes').update(payload).eq('id', existing.id);
+    } else {
+       await supabase.from('resumes').insert(payload);
+    }
+  };
+
+  // Job Actions
+  const handleAddJob = async (job: Job) => {
+    // Optimistic UI update
+    const tempId = Date.now().toString();
+    const optimisticJob = { ...job, id: tempId };
+    setJobs(prev => [optimisticJob, ...prev]);
+
+    try {
+      const { data, error } = await supabase.from('jobs').insert({
+        company: job.company,
+        role: job.role,
+        location: job.location,
+        salary: job.salary,
+        status: job.status,
+        date_applied: job.dateApplied,
+        description: job.description,
+        cover_letter: job.coverLetter,
+        interview_guide: job.interviewGuide,
+        email: job.email,
+        origin: job.origin,
+        user_id: session?.user.id
+      }).select().single();
+
+      if (error) throw error;
+
+      // Replace optimistic job with real one
+      const realJob: Job = {
+        ...job,
+        id: data.id,
+      };
+      setJobs(prev => prev.map(j => j.id === tempId ? realJob : j));
+    } catch (error) {
+      console.error("Error adding job", error);
+      // Revert optimistic update
+      setJobs(prev => prev.filter(j => j.id !== tempId));
+    }
+  };
+
+  const handleUpdateJob = async (job: Job) => {
+    setJobs(prev => prev.map(j => j.id === job.id ? job : j));
+
+    // Check for Status Change notification
+    const oldJob = jobs.find(j => j.id === job.id);
+    if (oldJob && oldJob.status !== job.status) {
+       handleJobStatusChangeNotification(job, job.status as JobStatus);
+    }
+
+    try {
+      await supabase.from('jobs').update({
+        company: job.company,
+        role: job.role,
+        location: job.location,
+        salary: job.salary,
+        status: job.status,
+        date_applied: job.dateApplied,
+        description: job.description,
+        cover_letter: job.coverLetter,
+        interview_guide: job.interviewGuide,
+        email: job.email
+      }).eq('id', job.id);
+    } catch (error) {
+      console.error("Error updating job", error);
+    }
+  };
+
+  const handleDeleteJob = async (id: string) => {
+    setJobs(prev => prev.filter(j => j.id !== id));
+    try {
+      await supabase.from('jobs').delete().eq('id', id);
+    } catch (error) {
+      console.error("Error deleting job", error);
+    }
+  };
 
   const handleAttachAvatar = (avatarUrl: string) => {
     setResume(prev => ({ ...prev, avatar: avatarUrl }));
   };
 
-  const handleJobStatusChange = (job: Job, newStatus: JobStatus) => {
-    // Only trigger notification if status is Accepted or Rejected
+  const handleJobStatusChangeNotification = (job: Job, newStatus: JobStatus) => {
     if (newStatus === JobStatus.ACCEPTED || newStatus === JobStatus.REJECTED) {
       let messageText = '';
       
@@ -106,8 +245,6 @@ const App: React.FC = () => {
         };
         
         setClaireMessages(prev => [...prev, newMessage]);
-        
-        // Mark as unread if not currently in chat view
         if (currentView !== ViewState.CLAIRE) {
           setUnreadClaire(true);
         }
@@ -115,14 +252,41 @@ const App: React.FC = () => {
     }
   };
 
+  // Clear unread badge when viewing Claire
+  useEffect(() => {
+    if (currentView === ViewState.CLAIRE) {
+      setUnreadClaire(false);
+    }
+  }, [currentView]);
+
+  if (!session) {
+    return <Auth />;
+  }
+
   const renderContent = () => {
     switch (currentView) {
       case ViewState.DASHBOARD:
         return <Dashboard jobs={jobs} />;
       case ViewState.JOBS:
-        return <JobTracker jobs={jobs} setJobs={setJobs} viewMode="applications" onStatusChange={handleJobStatusChange} />;
+        return (
+           <JobTracker 
+             jobs={jobs} 
+             onAddJob={handleAddJob}
+             onUpdateJob={handleUpdateJob}
+             onDeleteJob={handleDeleteJob}
+             viewMode="applications" 
+           />
+        );
       case ViewState.OFFERS:
-        return <JobTracker jobs={jobs} setJobs={setJobs} viewMode="offers" onStatusChange={handleJobStatusChange} />;
+        return (
+          <JobTracker 
+             jobs={jobs} 
+             onAddJob={handleAddJob}
+             onUpdateJob={handleUpdateJob}
+             onDeleteJob={handleDeleteJob}
+             viewMode="offers" 
+           />
+        );
       case ViewState.RESUME:
         return <ResumeBuilder resume={resume} setResume={setResume} />;
       case ViewState.AVATAR:
@@ -143,7 +307,11 @@ const App: React.FC = () => {
       />
       
       <main className="flex-1 h-screen overflow-auto relative custom-scrollbar">
-        {renderContent()}
+        {loading ? (
+            <div className="h-full flex items-center justify-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-brand-primary"></div>
+            </div>
+        ) : renderContent()}
       </main>
     </div>
   );
